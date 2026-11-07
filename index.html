@@ -125,6 +125,24 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
   background:linear-gradient(to bottom,var(--bg) 60%,transparent);transition:transform .25s,opacity .25s}
 .p-title{flex:1;min-width:0;margin:0 4px;font-family:var(--f-display);font-weight:700;font-size:22px;letter-spacing:.03em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .p-top .tool{min-width:40px;padding:0 8px}
+
+.p-diag{position:absolute;left:0;right:0;top:calc(env(safe-area-inset-top) + 56px);z-index:4;display:flex;align-items:flex-start;gap:8px;
+  padding:0 max(8px,env(safe-area-inset-right)) 0 max(8px,env(safe-area-inset-left))}
+.p-diag[data-open="false"]{justify-content:flex-end}
+.p-diag[data-open="false"] .diag-tiles{display:none}
+.diag-tiles{flex:1;min-width:0;min-height:104px;display:flex;align-items:center;gap:12px;padding:6px 12px;overflow-x:auto;scrollbar-width:none;
+  background:var(--surface);border:1px solid var(--line);border-radius:12px}
+.diag-tiles::-webkit-scrollbar{display:none}
+.diag-btn{flex:none;min-width:40px;min-height:40px;padding:0 10px;border-radius:10px;border:1px solid var(--line);background:var(--surface);
+  color:var(--fg);font-size:13px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.tile{flex:none;display:flex;flex-direction:column;align-items:center;gap:3px;min-width:46px}
+.tile-name{font-family:var(--f-mono);font-weight:700;font-size:13px;line-height:1;color:var(--accent);white-space:nowrap}
+.tile img{display:block;height:70px;width:auto;filter:invert(1)}
+.tile.noimg{justify-content:center;min-height:90px}
+.tile.noimg .tile-name{font-size:20px}
+.diag-empty{color:var(--muted);font-size:13px}
+@media (prefers-color-scheme: light){:root:not([data-theme="dark"]) .tile img{filter:none}}
+:root[data-theme="light"] .tile img{filter:none}
 .p-dock{position:absolute;left:0;right:0;bottom:0;z-index:5;display:flex;flex-direction:column;gap:10px;
   padding:30px max(12px,env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left));
   background:linear-gradient(to top,var(--bg) 70%,transparent);transition:transform .25s,opacity .25s}
@@ -211,7 +229,11 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 <section id="view-play" class="view player" hidden>
   <div class="stage">
     <div id="sheet" class="letra"><div id="lines"></div></div>
-    <div class="marker" aria-hidden="true"></div>
+    <div class="marker" id="marker" aria-hidden="true"></div>
+  </div>
+  <div class="p-diag" id="p-diag" data-open="true" hidden>
+    <div class="diag-tiles" id="diag-tiles"></div>
+    <button id="diag-btn" class="diag-btn" type="button"></button>
   </div>
   <header class="p-top" id="p-top">
     <button id="p-back" class="tool" type="button" aria-label="Voltar para a lista"></button>
@@ -248,15 +270,17 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 
 /* ==pure-start== */
 /* Acordes: C, Am7, F#m7(b5), C/E, A7M, Dsus4, Bb, G7(#9) */
-var CHORD_RE = /^[A-G][#b]?(?:maj|min|dim|aug|sus|add|m|M|°|º|\+|-)?\d{0,2}M?(?:(?:sus|add|maj|dim|aug|#|b|\+|-)?\d{1,2})*(?:\([^)]*\))*(?:\/(?:[A-G][#b]?|\d{1,2}))?$/;
+var CHORD_RE = /^[A-G][#b]?(?:maj|min|dim|aug|sus|add|m|M|°|º|\+|-)?\d{0,2}M?(?:(?:sus|add|maj|dim|aug|#|b|\+|-)?\d{1,2})*[+\-]?(?:\([^)]*\))*(?:\/(?:[A-G][#b]?|\d{1,2}))?$/;
 var SECTION_RE = /^\s*(?:\[[^\]]{1,40}\]|\(?(?:intro(?:du[cç][aã]o)?|refr[aã]o|verso|ponte|solo|final|pr[eé][- ]?refr[aã]o|coro|estrofe|outro|interl[uú]dio|bridge|chorus|verse|riff|parte)(?:\s*(?:\d+[ªa]?|[A-D]))?(?:\s*\(?\d+x\)?)?\)?\s*:?)\s*$/i;
 var NEUTRAL_RE = /^(?:[|\/\\\-–—.%·•]+|x\d+|\d+x|\(?\d+x\)?|n\.?c\.?|\.{2,3}|\(?repete\)?)$/i;
 var TAB_RE = /^[A-Ga-g]?\|[-\dhpbrx\/\\~()|\s]{5,}$/;
 
+var HEADER_RE = /^\s*(?:tom|afina[cç][aã]o|capotraste|capo)\s*:/i;
+
 function classify(raw){
   var t = raw.trim();
   if(!t) return 'blank';
-  if(SECTION_RE.test(t)) return 'section';
+  if(SECTION_RE.test(t) || HEADER_RE.test(t)) return 'section';
   if(TAB_RE.test(t)) return 'tab';
   var toks = t.split(/\s+/), chords = 0, other = 0;
   for(var i=0;i<toks.length;i++){
@@ -338,21 +362,23 @@ function kindOf(s){
 /* Monta o modelo de uma música: linhas com tipo, lista de palavras cantadas e mapa palavra -> linha de letra. */
 function parseLines(src){
   var lines = src.map(function(s){ return {raw:s.t, type:'', ly:0}; });
-  var words=[], wordLy=[], ly=[], n=0, hasChords=false;
+  var words=[], wordLy=[], ly=[], n=0, hasChords=false, chordsAt=[], run=[];
   for(var i=0;i<lines.length;i++){
     var l = lines[i];
     l.type = kindOf(src[i]);
-    if(l.type==='chords') hasChords=true;
+    if(l.type==='chords'){ hasChords=true; run = run.concat(chordsOfLine(l.raw)); }
+    else if(l.type!=='lyric') run = [];
     if(l.type==='lyric'){
       var ws = normWords(l.raw);
       ly.push({line:i, w0:words.length});
+      chordsAt.push(run.filter(function(c, k){ return run.indexOf(c)===k; })); run = [];
       for(var j=0;j<ws.length;j++){ words.push(ws[j]); wordLy.push(n); }
       l.ly = n; n++;
     } else {
       l.ly = n;
     }
   }
-  return {lines:lines, words:words, wordLy:wordLy, ly:ly, hasChords:hasChords};
+  return {lines:lines, words:words, wordLy:wordLy, ly:ly, hasChords:hasChords, chordsAt:chordsAt};
 }
 
 /* Converte os itens de texto de uma página de PDF (formato do pdf.js) em linhas de texto.
@@ -435,12 +461,100 @@ function layoutPage(raw){
   });
   return out;
 }
+/* ---- desenhos de acordes: cifras com um bloco de diagramas no fim (como as da Cifra Club) ---- */
+function chordName(k){
+  if(CHORD_RE.test(k)) return k;
+  var c = k.replace(/^[\[|(]+|[\]|:)]+$/g,'');
+  return (c && CHORD_RE.test(c)) ? c : '';
+}
+function chordsOfLine(t){
+  var out = [];
+  t.trim().split(/\s+/).forEach(function(k){
+    var c = chordName(k);
+    if(c && out.indexOf(c)<0) out.push(c);
+  });
+  return out;
+}
+
+/* Acha, pela posição do texto, as linhas que só têm nomes de acordes e têm um espaço grande
+   embaixo (onde ficam os desenhos). Medidas em pontos do PDF. */
+function diagramCandidates(raw){
+  var items = raw.filter(function(i){ return i && typeof i.str==='string' && i.str.trim()!=='' && i.transform; })
+    .map(function(i){ return {s:i.str.replace(/ /g,' '), x:i.transform[4], y:i.transform[5], w:i.width||0, h:Math.abs(i.height||i.transform[3]||10)}; });
+  if(!items.length) return [];
+  var hs = items.map(function(i){ return i.h; }).sort(function(a,b){ return a-b; });
+  var hMed = hs[Math.floor(hs.length/2)] || 10;
+  items.sort(function(a,b){ return (b.y-a.y) || (a.x-b.x); });
+  var rows = [];
+  items.forEach(function(it){
+    var r = rows[rows.length-1];
+    if(r && Math.abs(r.y-it.y) <= hMed*0.45) r.items.push(it); else rows.push({y:it.y, items:[it]});
+  });
+  rows.forEach(function(r){
+    r.items.sort(function(a,b){ return a.x-b.x; });
+    r.tokens = [];
+    r.items.forEach(function(it){
+      var cw = it.w/Math.max(1, it.s.length), re = /\S+/g, m;
+      while((m = re.exec(it.s))) r.tokens.push({s:m[0], x0:it.x+m.index*cw, x1:it.x+(m.index+m[0].length)*cw});
+    });
+    r.h = Math.max.apply(null, r.items.map(function(i){ return i.h; }));
+    r.numeric = r.tokens.length>0 && r.tokens.every(function(t){ return /^\d{1,2}$/.test(t.s); });
+    r.chords = r.tokens.length>0 && r.tokens.every(function(t){ return !!chordName(t.s); });
+  });
+  var out = [];
+  for(var i=0;i<rows.length;i++){
+    var r = rows[i];
+    if(!r.chords) continue;
+    var j = i+1;
+    while(j<rows.length && rows[j].numeric) j++;
+    var yBase = r.y - 0.3*r.h;
+    var yLow = j<rows.length ? rows[j].y + 0.85*rows[j].h : r.y - 100;
+    if(yBase - yLow < 45) continue;
+    out.push({yTop:r.y + r.h, yBase:yBase, yLow:yLow,
+      tokens:r.tokens.map(function(t){ return {name:chordName(t.s), cx:(t.x0+t.x1)/2}; })});
+  }
+  return out;
+}
+
+/* Numa faixa da página já desenhada (lum = brilho 0-255, W pixels de largura), acha os desenhos
+   lado a lado e liga cada um ao nome do acorde mais próximo. S = pixels por ponto. */
+function scanDiagramRow(lum, W, y0, y1, S, tokens){
+  var cols = new Uint8Array(W), top = 1e9, bot = -1, x, y;
+  for(y=y0; y<=y1; y++){
+    var b = y*W, any = false;
+    for(x=0; x<W; x++) if(lum[b+x] < 140){ cols[x] = 1; any = true; }
+    if(any){ if(y<top) top = y; bot = y; }
+  }
+  if(bot < 0 || (bot-top) < 28*S) return null;
+  var segs = [], start = -1, last = -1, gap = 0, lim = 16*S;
+  for(x=0; x<W; x++){
+    if(cols[x]){ if(start<0) start = x; last = x; gap = 0; }
+    else if(start>=0){ gap++; if(gap > lim){ segs.push([start,last]); start = -1; } }
+  }
+  if(start>=0) segs.push([start,last]);
+  var out = [];
+  tokens.forEach(function(t){
+    var best = null, bd = 1e9;
+    segs.forEach(function(s){ var d = Math.abs((s[0]+s[1])/2 - t.cx); if(d<bd){ bd = d; best = s; } });
+    if(!best || bd > 28*S) return;
+    var w = best[1]-best[0]+1;
+    if(w < 18*S || w > 90*S) return;
+    var t0 = 1e9, t1 = -1;
+    for(var yy=y0; yy<=y1; yy++){
+      var bb = yy*W;
+      for(var xx=best[0]; xx<=best[1]; xx++){ if(lum[bb+xx] < 140){ if(yy<t0) t0 = yy; t1 = yy; break; } }
+    }
+    if(t1 - t0 < 25*S) return;
+    out.push({name:t.name, x0:best[0], x1:best[1], y0:t0, y1:t1});
+  });
+  return out.length >= Math.ceil(tokens.length*0.7) ? out : null;
+}
 /* ==pure-end== */
 
 /* ---------- utilidades e armazenamento ---------- */
 var $ = function(id){ return document.getElementById(id); };
 var KEY = 'colaDePalco.v1';
-var store = {songs:[], prefs:{theme:'auto', fsLetra:30, fsCifra:17, cifra:false, mode:'voz', lpm:12}};
+var store = {songs:[], chords:{}, prefs:{theme:'auto', fsLetra:30, fsCifra:17, cifra:false, mode:'voz', lpm:12, diag:true}};
 var storageOk = true;
 
 function load(){
@@ -449,6 +563,7 @@ function load(){
     if(j){
       if(Array.isArray(j.songs)) store.songs = j.songs;
       if(j.prefs) Object.assign(store.prefs, j.prefs);
+      if(j.chords && typeof j.chords==='object') store.chords = j.chords;
     }
   }catch(_){ storageOk = false; }
   store.songs = store.songs.filter(function(s){ return s && typeof s==='object'; });
@@ -504,7 +619,10 @@ function renderLib(){
   var ul = $('songs');
   ul.textContent = '';
   $('empty').hidden = store.songs.length > 0;
-  $('count').textContent = store.songs.length ? store.songs.length + (store.songs.length===1 ? ' música' : ' músicas') : '';
+  var nAc = Object.keys(store.chords).length;
+  $('count').textContent = store.songs.length
+    ? store.songs.length + (store.songs.length===1 ? ' música' : ' músicas') + (nAc ? ' · ' + nAc + ' desenhos de acordes' : '')
+    : '';
   store.songs.forEach(function(s){
     var info = songInfo(s);
     var li = document.createElement('li'); li.className = 'song';
@@ -528,18 +646,74 @@ function addSong(title, text){
 }
 function titleFromName(n){ return n.replace(/\.[^.]+$/,'').replace(/_+/g,' ').trim() || 'Sem título'; }
 
+/* Recorta um desenho da página como PNG preto com fundo transparente: no tema escuro as cores
+   são invertidas pelo estilo, e o desenho combina com qualquer fundo. */
+function cropAlpha(lum, W, H, f, pad){
+  var x0 = Math.max(0, f.x0-pad), y0 = Math.max(0, f.y0-pad);
+  var x1 = Math.min(W-1, f.x1+pad), y1 = Math.min(H-1, f.y1+pad);
+  var w = x1-x0+1, h = y1-y0+1;
+  var c = document.createElement('canvas'); c.width = w; c.height = h;
+  var cx = c.getContext('2d'), id = cx.createImageData(w, h), d = id.data;
+  for(var y=0;y<h;y++) for(var x=0;x<w;x++){
+    var a = 255 - lum[(y0+y)*W + (x0+x)], o = (y*w+x)*4;
+    d[o] = d[o+1] = d[o+2] = 0; d[o+3] = a < 16 ? 0 : a;
+  }
+  cx.putImageData(id, 0, 0);
+  return c.toDataURL('image/png');
+}
+
+/* Procura, numa página, o bloco de desenhos de acordes. Devolve os desenhos por nome e as faixas
+   de texto (em coordenadas do PDF) que pertencem ao bloco e devem sair do texto da música. */
+async function pageDiagrams(page, rawItems){
+  var res = {chords:{}, skip:[]};
+  var cands = diagramCandidates(rawItems);
+  if(!cands.length) return res;
+  var S = 2.5, vp = page.getViewport({scale:S});
+  var cv = document.createElement('canvas');
+  cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
+  var ctx = cv.getContext('2d', {willReadFrequently:true});
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height);
+  await page.render({canvasContext:ctx, viewport:vp}).promise;
+  var px = ctx.getImageData(0, 0, cv.width, cv.height).data, W = cv.width, H = cv.height;
+  var lum = new Uint8Array(W*H);
+  for(var p=0, q=0; p<W*H; p++, q+=4) lum[p] = (px[q]*299 + px[q+1]*587 + px[q+2]*114) / 1000;
+  cands.forEach(function(c){
+    var y0 = Math.max(0, Math.round(vp.convertToViewportPoint(0, c.yBase)[1]) + 2);
+    var y1 = Math.min(H-1, Math.round(vp.convertToViewportPoint(0, c.yLow)[1]));
+    if(y1 - y0 < 30*S) return;
+    var toks = c.tokens.map(function(t){ return {name:t.name, cx:vp.convertToViewportPoint(t.cx, 0)[0]}; });
+    var found = scanDiagramRow(lum, W, y0, y1, S, toks);
+    if(!found) return;
+    found.forEach(function(f){ res.chords[f.name] = cropAlpha(lum, W, H, f, 3); });
+    res.skip.push([c.yLow, c.yTop + 1]);
+  });
+  cv.width = cv.height = 0;
+  return res;
+}
+
 async function pdfToText(file){
   if(!window.pdfjsLib) throw new Error('sem-leitor');
   var data = new Uint8Array(await file.arrayBuffer());
   var pdf = await pdfjsLib.getDocument({data:data, isEvalSupported:false}).promise;
-  var pages = [];
+  var pages = [], chords = {};
   for(var p=1;p<=pdf.numPages;p++){
     var page = await pdf.getPage(p);
     var tc = await page.getTextContent();
-    var ls = layoutPage(tc.items);
+    var items = tc.items;
+    try{
+      var dg = await pageDiagrams(page, items);
+      Object.assign(chords, dg.chords);
+      if(dg.skip.length){
+        items = items.filter(function(it){
+          var y = it.transform && it.transform[5];
+          return !dg.skip.some(function(r){ return y>=r[0] && y<=r[1]; });
+        });
+      }
+    }catch(e){ /* sem desenhos: segue só com o texto */ }
+    var ls = layoutPage(items);
     if(ls.length) pages.push(ls.join('\n'));
   }
-  return pages.join('\n\n');
+  return {text:pages.join('\n\n'), chords:chords};
 }
 
 function withTimeout(p, ms){
@@ -554,15 +728,19 @@ $('file-in').addEventListener('change', async function(){
   var files = Array.prototype.slice.call(inp.files || []);
   if(!files.length) return;
   note('Lendo ' + files.length + (files.length===1 ? ' arquivo…' : ' arquivos…'));
-  var ok = 0, fails = [], last = null;
+  var ok = 0, fails = [], last = null, nDraw = 0;
   for(var i=0;i<files.length;i++){
     var f = files[i];
     try{
       var isPdf = /\.pdf$/i.test(f.name) || f.type==='application/pdf';
-      var raw = isPdf ? await withTimeout(pdfToText(f), 60000) : await f.text();
-      var text = cleanupText(raw);
+      var got = isPdf ? await withTimeout(pdfToText(f), 90000) : {text: await f.text(), chords:{}};
+      var text = cleanupText(got.text);
       if(!text.trim()) throw new Error('sem-texto');
       last = addSong(titleFromName(f.name), text); ok++;
+      var nk = Object.keys(got.chords);
+      nk.forEach(function(k){ store.chords[k] = got.chords[k]; });
+      nDraw += nk.length;
+      if(nk.length) save();
     }catch(e){
       var why = 'não consegui ler' + (e && e.name && e.name!=='Error' ? ' (' + e.name + ')' : '');
       if(e && e.message==='sem-texto') why = 'PDF sem texto (parece foto ou digitalização)';
@@ -576,9 +754,11 @@ $('file-in').addEventListener('change', async function(){
   renderLib();
   var msg = ok ? ok + (ok===1 ? ' música adicionada.' : ' músicas adicionadas.') : '';
   if(fails.length) msg += (msg?' ':'') + 'Não deu certo: ' + fails.join('; ') + '.';
+  var drawMsg = nDraw ? nDraw + (nDraw===1 ? ' desenho de acorde guardado.' : ' desenhos de acordes guardados.') : '';
+  if(drawMsg) msg += (msg?' ':'') + drawMsg;
   note(msg);
   if(ok===1 && files.length===1 && last){
-    openEditor(last.id, 'lib', 'Confira o texto convertido. Marque o que é Letra, Acorde ou Parte e insira linhas onde precisar.');
+    openEditor(last.id, 'lib', 'Confira o texto convertido. Marque o que é Letra, Acorde ou Parte e insira linhas onde precisar.' + (drawMsg ? ' ' + drawMsg : ''));
   }
 });
 
@@ -586,7 +766,7 @@ $('file-in').addEventListener('change', async function(){
 $('btn-export').addEventListener('click', function(){
   if(!store.songs.length){ note('Ainda não há músicas para guardar.'); return; }
   try{
-    var data = JSON.stringify({app:'cola-de-palco', versao:1, musicas:store.songs}, null, 1);
+    var data = JSON.stringify({app:'cola-de-palco', versao:1, musicas:store.songs, acordes:store.chords}, null, 1);
     var url = URL.createObjectURL(new Blob([data], {type:'application/json'}));
     var a = document.createElement('a');
     a.href = url; a.download = 'cola-de-palco-musicas.json';
@@ -602,6 +782,13 @@ $('restore-in').addEventListener('change', async function(){
     var j = JSON.parse(await f.text());
     var list = Array.isArray(j) ? j : (j && (j.musicas || j.songs));
     if(!Array.isArray(list)) throw new Error('formato');
+    var nAc = 0;
+    if(j && j.acordes && typeof j.acordes==='object'){
+      Object.keys(j.acordes).forEach(function(k){
+        var v = j.acordes[k];
+        if(typeof v==='string' && v.indexOf('data:image/png;base64,')===0 && !store.chords[k]){ store.chords[k] = v; nAc++; }
+      });
+    }
     var have = {}, added = 0, dup = 0;
     store.songs.forEach(function(s){ have[s.id] = 1; });
     list.forEach(function(s){
@@ -616,7 +803,7 @@ $('restore-in').addEventListener('change', async function(){
       store.songs.push({id:id, title:String(s.title || 'Sem título'), lines:lines});
     });
     save(); renderLib();
-    note(added + (added===1 ? ' música restaurada.' : ' músicas restauradas.') + (dup ? ' ' + dup + ' já estavam na lista.' : ''));
+    note(added + (added===1 ? ' música restaurada.' : ' músicas restauradas.') + (dup ? ' ' + dup + ' já estavam na lista.' : '') + (nAc ? ' ' + nAc + ' desenhos de acordes.' : ''));
   }catch(e){
     note('Esse arquivo não parece ser uma cópia do Cola de Palco.');
   }
@@ -803,7 +990,7 @@ $('btn-del').addEventListener('click', function(){
 /* ---------- leitor ---------- */
 var P = {active:false, song:null, parsed:null, els:[], lyEls:[], cur:0, painted:-1, mode:'voz', playing:false,
   live:false, err:'', sp:0, target:0, touching:false, markerY:0, pitch:40, pos:-1, raf:0, t:0, lastCur:0,
-  chromeOff:false, hideTimer:0, resyncTimer:0, askId:0};
+  chromeOff:false, hideTimer:0, resyncTimer:0, askId:0, diag:false};
 
 function isCifra(){ return !!(P.parsed && P.parsed.hasChords && store.prefs.cifra); }
 function maxScroll(){ var s=$('sheet'); return Math.max(0, s.scrollHeight - s.clientHeight); }
@@ -835,10 +1022,55 @@ function paintState(){
     P.els[i].classList.toggle('past', n < P.cur);
     P.els[i].classList.toggle('now', n === P.cur);
   }
+  renderDiag();
 }
+/* Faixa fixa com os desenhos dos acordes da linha atual */
+var diagSig = '';
+function diagAvail(){
+  if(!P.parsed) return false;
+  return P.parsed.chordsAt.some(function(a){ return a.some(function(c){ return !!store.chords[c]; }); });
+}
+function renderDiag(){
+  var box = $('p-diag');
+  if(!P.parsed || !P.diag){ box.hidden = true; return; }
+  box.hidden = false;
+  var open = store.prefs.diag !== false;
+  box.dataset.open = String(open);
+  var btn = $('diag-btn');
+  btn.innerHTML = open ? ICON.up : '<span>Acordes</span>' + ICON.down;
+  btn.setAttribute('aria-label', open ? 'Ocultar desenhos dos acordes' : 'Mostrar desenhos dos acordes');
+  btn.setAttribute('aria-expanded', String(open));
+  if(!open){ diagSig = ''; return; }
+  var names = P.parsed.chordsAt[P.cur] || [];
+  var sig = names.join('|');
+  if(sig === diagSig) return;
+  diagSig = sig;
+  var t = $('diag-tiles'); t.textContent = '';
+  if(!names.length){
+    var e = document.createElement('span'); e.className = 'diag-empty'; e.textContent = 'Sem acordes nesta linha';
+    t.append(e); return;
+  }
+  names.forEach(function(name){
+    var d = document.createElement('div'); d.className = 'tile';
+    var nm = document.createElement('span'); nm.className = 'tile-name'; nm.textContent = name;
+    var src = store.chords[name];
+    if(src){
+      var im = document.createElement('img'); im.src = src; im.alt = 'Desenho do acorde ' + name;
+      d.append(nm, im);
+    } else { d.classList.add('noimg'); d.append(nm); }
+    t.append(d);
+  });
+}
+
 function layout(){
   var sheet = $('sheet'), h = sheet.clientHeight, box = $('lines');
   P.markerY = Math.round(h*0.38);
+  var dg = $('p-diag');
+  if(!dg.hidden){
+    var below = dg.getBoundingClientRect().bottom - sheet.getBoundingClientRect().top;
+    P.markerY = Math.max(P.markerY, Math.round(below) + 40);
+  }
+  $('marker').style.top = P.markerY + 'px';
   box.style.paddingTop = P.markerY + 'px';
   box.style.paddingBottom = Math.max(0, h-P.markerY) + 'px';
   var content = box.scrollHeight - P.markerY - Math.max(0, h-P.markerY);
@@ -1079,6 +1311,7 @@ function openSong(id){
   var s = store.songs.filter(function(x){ return x.id===id; })[0];
   if(!s) return;
   P.song = s; P.parsed = parseLines(s.lines);
+  P.diag = diagAvail(); diagSig = '';
   P.mode = store.prefs.mode; P.playing = false; P.err = ''; P.pos = -1; P.cur = 0; P.painted = -1;
   $('p-title').textContent = s.title;
   $('p-cifra').hidden = !P.parsed.hasChords;
@@ -1101,6 +1334,10 @@ $('p-back').innerHTML = ICON.back;
 $('p-prev').innerHTML = ICON.up;
 $('p-next').innerHTML = ICON.down;
 $('p-back').addEventListener('click', closePlayer);
+$('diag-btn').addEventListener('click', function(){
+  store.prefs.diag = store.prefs.diag === false;
+  save(); diagSig = ''; renderDiag(); layout(); jumpTo(P.cur);
+});
 $('p-edit').innerHTML = ICON.pencil;
 $('p-edit').addEventListener('click', function(){
   var id = P.song.id;
